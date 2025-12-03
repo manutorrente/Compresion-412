@@ -7,6 +7,9 @@
 NUM_CHILD_PROCESSES="${1:-4}"
 ROUTES_FILE="${2:-rutas_landing.txt}"
 ALL_FILES_MODE=0
+DAYS_BACK=7
+MIN_FILE_SIZE_THRESHOLD=1048576  # 1MB minimum file size
+EXCLUDED_EXTENSIONS="dat|gz|bz2|zip|rar|xz|lz4|zst|gzip"  # Extensions to skip
 
 # Check for --all flag
 for arg in "$@"; do
@@ -87,20 +90,66 @@ while IFS= read -r route || [ -n "$route" ]; do
     
     # Find all files in the route modified in the last 7 days (or all if --all flag)
     if [ $ALL_FILES_MODE -eq 1 ]; then
-        # Get all files
-        if hdfs dfs -find "$route" -type f 2>/dev/null >> "$ALL_FILEPATHS_FILE"; then
-            file_count=$(hdfs dfs -find "$route" -type f 2>/dev/null | wc -l)
-            main_log "    Found $file_count files"
+        # Get all files - use ls recursively and extract paths with size filtering
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r perms repl owner group size month day time year_or_time filepath; do
+            # Skip files with excluded extensions
+            if [[ "$filepath" =~ \.($EXCLUDED_EXTENSIONS)$ ]]; then
+                continue
+            fi
+            
+            # Skip files smaller than MIN_FILE_SIZE_THRESHOLD
+            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
+                continue
+            fi
+            
+            echo "$filepath" >> "$ALL_FILEPATHS_FILE"
+        done
+        
+        file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        if [ "$file_count" -gt 0 ]; then
+            main_log "    Found $file_count eligible files (after size and extension filters)"
         else
-            main_log "    Warning: Could not scan route (may not exist or permission issue)"
+            main_log "    Warning: Could not scan route or no eligible files found"
         fi
     else
-        # Get files modified in the last 7 days
-        if hdfs dfs -find "$route" -type f -mtime -7 2>/dev/null >> "$ALL_FILEPATHS_FILE"; then
-            file_count=$(hdfs dfs -find "$route" -type f -mtime -7 2>/dev/null | wc -l)
-            main_log "    Found $file_count files"
+        # Get files modified in the last N days with size and extension filtering
+        # Calculate cutoff timestamp (current time - DAYS_BACK days)
+        cutoff_timestamp=$(($(date +%s) - (DAYS_BACK * 86400)))
+        
+        # Use ls -R and filter by modification time, size, and extension
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r perms repl owner group size month day time year_or_time filepath; do
+            # Skip files with excluded extensions
+            if [[ "$filepath" =~ \.($EXCLUDED_EXTENSIONS)$ ]]; then
+                continue
+            fi
+            
+            # Skip files smaller than MIN_FILE_SIZE_THRESHOLD
+            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
+                continue
+            fi
+            
+            # Parse the date fields to create a timestamp for comparison
+            # Try to handle both date formats: "MMM DD HH:MM" (recent) or "MMM DD  YYYY" (older)
+            if [[ "$time" =~ ^[0-9]{4}$ ]]; then
+                # Format: MMM DD YYYY - older file
+                file_date=$(date -d "$month $day $time" +%s 2>/dev/null)
+            else
+                # Format: MMM DD HH:MM - recent file (this year)
+                current_year=$(date +%Y)
+                file_date=$(date -d "$month $day $current_year $time" +%s 2>/dev/null)
+            fi
+            
+            # Compare timestamps if we successfully parsed the date
+            if [ -n "$file_date" ] && [ "$file_date" -gt "$cutoff_timestamp" ]; then
+                echo "$filepath" >> "$ALL_FILEPATHS_FILE"
+            fi
+        done
+        
+        file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        if [ "$file_count" -gt 0 ]; then
+            main_log "    Found $file_count eligible files (after date, size, and extension filters)"
         else
-            main_log "    Warning: Could not scan route (may not exist or permission issue)"
+            main_log "    Warning: Could not scan route or no eligible files found"
         fi
     fi
 done < "$ROUTES_FILE"

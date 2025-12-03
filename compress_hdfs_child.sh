@@ -8,7 +8,6 @@ INPUT_FILE="${1:-hdfs_paths.txt}"
 PROCESS_NUM="${PROCESS_NUM:-0}"
 LOG_FILE="${PROCESS_LOG:-compression_$(date +%Y%m%d_%H%M%S).log}"
 TEMP_CHECK_FILE="/tmp/hdfs_compress_check_$"
-MIN_FILE_SIZE_THRESHOLD=1048576  # 1MB minimum file size for compression
 
 # Logging function with process identifier
 log() {
@@ -60,29 +59,15 @@ while IFS= read -r hdfs_path || [ -n "$hdfs_path" ]; do
     # Trim whitespace
     hdfs_path=$(echo "$hdfs_path" | xargs)
     
-    # Skip already compressed files and .dat files
-    if [[ "$hdfs_path" =~ \.(dat|gz|bz2|zip|rar|xz|lz4|zst|gzip)$ ]]; then
-        log "Skipping already compressed or excluded file: $hdfs_path"
-        continue
-    fi
-    
     TOTAL=$((TOTAL + 1))
     log "Processing ($TOTAL): $hdfs_path"
     
     # Define compressed file path
     compressed_path="${hdfs_path}.gz"
     
-    # Step 1: Check if source file exists and has size > 1KB
+    # Step 1: Verify file exists (in case it was deleted between parent scan and child execution)
     if ! hdfs dfs -ls "$hdfs_path" &>/dev/null; then
         log_error "Source file does not exist: $hdfs_path"
-        FAILED=$((FAILED + 1))
-        continue
-    fi
-    
-    # Check file size is greater than 1MB (1048576 bytes)
-    file_size=$(hdfs dfs -du -s "$hdfs_path" 2>/dev/null | awk '{print $1}')
-    if [ -z "$file_size" ] || [ "$file_size" -lt $MIN_FILE_SIZE_THRESHOLD ]; then
-        log_error "Source file too small (< $(format_bytes $MIN_FILE_SIZE_THRESHOLD)): $hdfs_path (size: $file_size bytes)"
         FAILED=$((FAILED + 1))
         continue
     fi
