@@ -162,11 +162,11 @@ while IFS= read -r route || [ -n "$route" ]; do
         hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" > "$hdfs_ls_temp"
         
         while read -r line; do
-            # Parse the line
+            # Parse the line - hdfs ls format: perms repl owner group size date time filepath
+            # Date can be YYYY-MM-DD or MMM DD format depending on hdfs version
             size=$(echo "$line" | awk '{print $5}')
-            month=$(echo "$line" | awk '{print $6}')
-            day=$(echo "$line" | awk '{print $7}')
-            time_or_year=$(echo "$line" | awk '{print $8}')
+            date_field=$(echo "$line" | awk '{print $6}')
+            time_field=$(echo "$line" | awk '{print $7}')
             filepath=$(echo "$line" | awk '{print $NF}')
             
             debug_parsed=$((debug_parsed + 1))
@@ -183,14 +183,17 @@ while IFS= read -r route || [ -n "$route" ]; do
                 continue
             fi
             
-            # Convert file timestamp
-            if [[ "$time_or_year" =~ ^[0-9]{4}$ ]]; then
-                # Year format: older file
-                file_ts=$(date -d "$month $day $time_or_year" +%s 2>/dev/null || echo 0)
+            # Convert file timestamp - handle different date formats
+            if [[ "$date_field" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                # ISO format: YYYY-MM-DD HH:MM
+                file_ts=$(date -d "$date_field $time_field" +%s 2>/dev/null || echo 0)
+            elif [[ "$time_field" =~ ^[0-9]{4}$ ]]; then
+                # Old format with year: MMM DD YYYY
+                file_ts=$(date -d "$date_field $time_field" +%s 2>/dev/null || echo 0)
             else
-                # Time format: current year - parse as HH:MM
+                # Old format with time: MMM DD HH:MM (current year)
                 current_year=$(date +%Y)
-                file_ts=$(date -d "$month $day $current_year $time_or_year" +%s 2>/dev/null || echo 0)
+                file_ts=$(date -d "$date_field $current_year $time_field" +%s 2>/dev/null || echo 0)
             fi
             
             # Add file if it's within cutoff
