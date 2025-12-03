@@ -3,25 +3,28 @@
 # HDFS File Compression Script (Parent Orchestrator)
 # Manages multiple child processes to compress files from landing routes
 
-# Configuration
-ROUTES_FILE="${1:-rutas_landing.txt}"
-NUM_CHILD_PROCESSES="${2:-4}"
+# Configuration - parse arguments properly
 ALL_FILES_MODE=0
 DAYS_BACK=7
 MIN_FILE_SIZE_THRESHOLD=1048576  # 1MB minimum file size
 EXCLUDED_EXTENSIONS="dat|gz|bz2|zip|rar|xz|lz4|zst|gzip"  # Extensions to skip
 
-# Check for --all flag and handle argument parsing
+# Parse arguments - handle positional args and --all flag
+ROUTES_FILE=""
+NUM_CHILD_PROCESSES=4
+
 for arg in "$@"; do
     if [ "$arg" = "--all" ]; then
         ALL_FILES_MODE=1
-    elif [ "$arg" != "$ROUTES_FILE" ] && [ "$arg" != "$NUM_CHILD_PROCESSES" ]; then
-        # If it looks like a number, use it as NUM_CHILD_PROCESSES
-        if [[ "$arg" =~ ^[0-9]+$ ]]; then
-            NUM_CHILD_PROCESSES="$arg"
-        fi
+    elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+        NUM_CHILD_PROCESSES="$arg"
+    elif [ -z "$ROUTES_FILE" ]; then
+        ROUTES_FILE="$arg"
     fi
 done
+
+# Default routes file if not specified
+ROUTES_FILE="${ROUTES_FILE:-rutas_landing.txt}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHILD_SCRIPT="$SCRIPT_DIR/compress_hdfs_child.sh"
