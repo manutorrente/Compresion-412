@@ -11,10 +11,15 @@ DAYS_BACK=7
 MIN_FILE_SIZE_THRESHOLD=1048576  # 1MB minimum file size
 EXCLUDED_EXTENSIONS="dat|gz|bz2|zip|rar|xz|lz4|zst|gzip"  # Extensions to skip
 
-# Check for --all flag
+# Check for --all flag and handle argument parsing
 for arg in "$@"; do
     if [ "$arg" = "--all" ]; then
         ALL_FILES_MODE=1
+    elif [ "$arg" != "$ROUTES_FILE" ] && [ "$arg" != "$NUM_CHILD_PROCESSES" ]; then
+        # If it looks like a number, use it as NUM_CHILD_PROCESSES
+        if [[ "$arg" =~ ^[0-9]+$ ]]; then
+            NUM_CHILD_PROCESSES="$arg"
+        fi
     fi
 done
 
@@ -177,10 +182,10 @@ while IFS= read -r route || [ -n "$route" ]; do
             
             # Convert file timestamp
             if [[ "$time_or_year" =~ ^[0-9]{4}$ ]]; then
-                # Year format
-                file_ts=$(date -d "$month $day $time_or_year 00:00" +%s 2>/dev/null || echo 0)
+                # Year format: older file
+                file_ts=$(date -d "$month $day $time_or_year" +%s 2>/dev/null || echo 0)
             else
-                # Time format
+                # Time format: current year - parse as HH:MM
                 current_year=$(date +%Y)
                 file_ts=$(date -d "$month $day $current_year $time_or_year" +%s 2>/dev/null || echo 0)
             fi
@@ -200,6 +205,26 @@ while IFS= read -r route || [ -n "$route" ]; do
         files_added=$((file_after - file_before))
         
         main_log "    Debug: Parsed=$debug_parsed, SkippedExt=$debug_skipped_ext, SkippedSize=$debug_skipped_size, SkippedDate=$debug_skipped_date, Collected=$debug_collected"
+        
+        # Debug: show first file's date parsing
+        if [ "$debug_parsed" -gt 0 ]; then
+            first_line=$(head -1 "$hdfs_ls_temp" 2>/dev/null)
+            if [ -n "$first_line" ]; then
+                first_month=$(echo "$first_line" | awk '{print $6}')
+                first_day=$(echo "$first_line" | awk '{print $7}')
+                first_time=$(echo "$first_line" | awk '{print $8}')
+                first_file=$(echo "$first_line" | awk '{print $NF}')
+                if [[ "$first_time" =~ ^[0-9]{4}$ ]]; then
+                    sample_ts=$(date -d "$first_month $first_day $first_time" +%s 2>/dev/null || echo "PARSE_ERROR")
+                else
+                    current_year=$(date +%Y)
+                    sample_ts=$(date -d "$first_month $first_day $current_year $first_time" +%s 2>/dev/null || echo "PARSE_ERROR")
+                fi
+                sample_date=$(date -d @"$sample_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "INVALID")
+                main_log "    Debug: Sample file date parsing: '$first_month $first_day $first_time' -> $sample_date (ts=$sample_ts, cutoff=$cutoff_timestamp)"
+                main_log "    Debug: Sample file: $first_file"
+            fi
+        fi
         
         if [ "$files_added" -gt 0 ]; then
             main_log "    Found $files_added eligible files (after date, size, and extension filters)"
