@@ -102,7 +102,11 @@ while IFS= read -r route || [ -n "$route" ]; do
         
         file_before=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
         
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r line; do
+        # Use temporary file to avoid subshell issues with pipes
+        hdfs_ls_temp=$(mktemp)
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" > "$hdfs_ls_temp"
+        
+        while read -r line; do
             # Parse the line
             size=$(echo "$line" | awk '{print $5}')
             filepath=$(echo "$line" | awk '{print $NF}')
@@ -118,7 +122,9 @@ while IFS= read -r route || [ -n "$route" ]; do
             fi
             
             echo "$filepath" >> "$ALL_FILEPATHS_FILE"
-        done
+        done < "$hdfs_ls_temp"
+        
+        rm -f "$hdfs_ls_temp"
         
         file_after=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
         files_added=$((file_after - file_before))
@@ -143,7 +149,11 @@ while IFS= read -r route || [ -n "$route" ]; do
         debug_skipped_date=0
         debug_collected=0
         
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r line; do
+        # Use temporary file to avoid subshell issues with pipes
+        hdfs_ls_temp=$(mktemp)
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" > "$hdfs_ls_temp"
+        
+        while read -r line; do
             # Parse the line
             size=$(echo "$line" | awk '{print $5}')
             month=$(echo "$line" | awk '{print $6}')
@@ -182,7 +192,9 @@ while IFS= read -r route || [ -n "$route" ]; do
             else
                 debug_skipped_date=$((debug_skipped_date + 1))
             fi
-        done
+        done < "$hdfs_ls_temp"
+        
+        rm -f "$hdfs_ls_temp"
         
         file_after=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
         files_added=$((file_after - file_before))
