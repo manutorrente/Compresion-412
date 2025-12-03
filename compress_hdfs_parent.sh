@@ -4,8 +4,8 @@
 # Manages multiple child processes to compress files from landing routes
 
 # Configuration
-NUM_CHILD_PROCESSES="${1:-4}"
-ROUTES_FILE="${2:-rutas_landing.txt}"
+ROUTES_FILE="${1:-rutas_landing.txt}"
+NUM_CHILD_PROCESSES="${2:-4}"
 ALL_FILES_MODE=0
 DAYS_BACK=7
 MIN_FILE_SIZE_THRESHOLD=1048576  # 1MB minimum file size
@@ -91,19 +91,25 @@ while IFS= read -r route || [ -n "$route" ]; do
     # Find all files in the route modified in the last 7 days (or all if --all flag)
     if [ $ALL_FILES_MODE -eq 1 ]; then
         # Get all files - use ls recursively and extract paths with size filtering
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r perms repl owner group size month day time year_or_time filepath; do
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | awk \
+            -v min_size="$MIN_FILE_SIZE_THRESHOLD" \
+            '
+        {
+            filepath = $NF
+            size = $5
+            
             # Skip files with excluded extensions
-            if [[ "$filepath" =~ \.($EXCLUDED_EXTENSIONS)$ ]]; then
-                continue
-            fi
+            if (filepath ~ /\.($EXCLUDED_EXTENSIONS)$/) {
+                next
+            }
             
-            # Skip files smaller than MIN_FILE_SIZE_THRESHOLD
-            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
-                continue
-            fi
+            # Skip files smaller than threshold
+            if (size < min_size) {
+                next
+            }
             
-            echo "$filepath" >> "$ALL_FILEPATHS_FILE"
-        done
+            print filepath
+        }' >> "$ALL_FILEPATHS_FILE"
         
         file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
         if [ "$file_count" -gt 0 ]; then
@@ -116,34 +122,51 @@ while IFS= read -r route || [ -n "$route" ]; do
         # Calculate cutoff timestamp (current time - DAYS_BACK days)
         cutoff_timestamp=$(($(date +%s) - (DAYS_BACK * 86400)))
         
-        # Use ls -R and filter by modification time, size, and extension
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r perms repl owner group size month day time year_or_time filepath; do
+        # Use awk to parse hdfs ls output and filter by date, size, and extension
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | awk \
+            -v cutoff="$cutoff_timestamp" \
+            -v min_size="$MIN_FILE_SIZE_THRESHOLD" \
+            -v excl_ext="$EXCLUDED_EXTENSIONS" \
+            '
+        {
+            # Fields: perms repl owner group size month day time/year ... filepath
+            filepath = $NF
+            size = $5
+            month = $6
+            day = $7
+            time_or_year = $8
+            
             # Skip files with excluded extensions
-            if [[ "$filepath" =~ \.($EXCLUDED_EXTENSIONS)$ ]]; then
-                continue
-            fi
+            if (filepath ~ /\.($EXCLUDED_EXTENSIONS)$/) {
+                next
+            }
             
-            # Skip files smaller than MIN_FILE_SIZE_THRESHOLD
-            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
-                continue
-            fi
+            # Skip files smaller than threshold
+            if (size < min_size) {
+                next
+            }
             
-            # Parse the date fields to create a timestamp for comparison
-            # Try to handle both date formats: "MMM DD HH:MM" (recent) or "MMM DD  YYYY" (older)
-            if [[ "$time" =~ ^[0-9]{4}$ ]]; then
-                # Format: MMM DD YYYY - older file
-                file_date=$(date -d "$month $day $time" +%s 2>/dev/null)
-            else
-                # Format: MMM DD HH:MM - recent file (this year)
-                current_year=$(date +%Y)
-                file_date=$(date -d "$month $day $current_year $time" +%s 2>/dev/null)
-            fi
+            # Parse date string and convert to timestamp
+            if (time_or_year ~ /^[0-9]{4}$/) {
+                # Year format: older file
+                datestr = month " " day " " time_or_year " 00:00"
+            } else {
+                # Time format: current year
+                current_year = strftime("%Y", systime())
+                datestr = month " " day " " current_year " " time_or_year
+            }
             
-            # Compare timestamps if we successfully parsed the date
-            if [ -n "$file_date" ] && [ "$file_date" -gt "$cutoff_timestamp" ]; then
-                echo "$filepath" >> "$ALL_FILEPATHS_FILE"
-            fi
-        done
+            # Convert to timestamp using system command
+            cmd = "date -d \"" datestr "\" +%s 2>/dev/null"
+            if ((cmd | getline file_ts) > 0) {
+                close(cmd)
+                if (file_ts > cutoff) {
+                    print filepath
+                }
+            } else {
+                close(cmd)
+            }
+        }' >> "$ALL_FILEPATHS_FILE"
         
         file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
         if [ "$file_count" -gt 0 ]; then
