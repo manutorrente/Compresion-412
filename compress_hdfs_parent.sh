@@ -320,19 +320,20 @@ for proc_num in $(seq 0 $((PROC_NUM - 1))); do
     
     if [ -f "$proc_log" ]; then
         # Extract structured results from child log (format: FINAL_RESULTS|key=value|key=value...)
-        results_line=$(grep "^FINAL_RESULTS|" "$proc_log" 2>/dev/null | tail -1)
+        # Note: log lines have timestamp prefix, so we grep for FINAL_RESULTS anywhere in line
+        results_line=$(grep "FINAL_RESULTS|" "$proc_log" 2>/dev/null | tail -1)
         
         if [ -n "$results_line" ]; then
-            # Parse key=value pairs from the structured line
-            processed=$(echo "$results_line" | grep -oP 'TOTAL=\K[0-9]+')
-            success=$(echo "$results_line" | grep -oP 'SUCCESS=\K[0-9]+')
-            failed=$(echo "$results_line" | grep -oP 'FAILED=\K[0-9]+')
-            bytes_saved=$(echo "$results_line" | grep -oP 'BYTES_SAVED=\K[0-9]+')
+            # Parse key=value pairs from the structured line (handle negative numbers)
+            processed=$(echo "$results_line" | grep -oP 'TOTAL=\K-?[0-9]+')
+            success=$(echo "$results_line" | grep -oP 'SUCCESS=\K-?[0-9]+')
+            failed=$(echo "$results_line" | grep -oP 'FAILED=\K-?[0-9]+')
+            bytes_saved=$(echo "$results_line" | grep -oP 'BYTES_SAVED=\K-?[0-9]+')
         else
             # Fallback to old parsing method if structured format not found
-            processed=$(grep "^Total files processed:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
-            success=$(grep "^Successful:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
-            failed=$(grep "^Failed:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
+            processed=$(grep "Total files processed:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
+            success=$(grep "Successful:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
+            failed=$(grep "Failed:" "$proc_log" 2>/dev/null | tail -1 | awk '{print $NF}')
             bytes_saved=$(grep "^Total space saved:" "$proc_log" 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
         fi
         
