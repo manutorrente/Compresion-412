@@ -88,89 +88,109 @@ while IFS= read -r route || [ -n "$route" ]; do
     
     main_log "  Scanning route: $route"
     
+    # Debug: check if route exists
+    if ! hdfs dfs -ls "$route" &>/dev/null; then
+        main_log "    Debug: Route does not exist or not accessible: $route"
+        continue
+    fi
+    main_log "    Debug: Route is accessible"
+    
     # Find all files in the route modified in the last 7 days (or all if --all flag)
     if [ $ALL_FILES_MODE -eq 1 ]; then
         # Get all files - use ls recursively and extract paths with size filtering
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | awk \
-            -v min_size="$MIN_FILE_SIZE_THRESHOLD" \
-            '
-        {
-            filepath = $NF
-            size = $5
+        main_log "    Debug: Mode=ALL, collecting all files >= $MIN_FILE_SIZE_THRESHOLD bytes"
+        
+        file_before=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r line; do
+            # Parse the line
+            size=$(echo "$line" | awk '{print $5}')
+            filepath=$(echo "$line" | awk '{print $NF}')
             
             # Skip files with excluded extensions
-            if (filepath ~ /\.($EXCLUDED_EXTENSIONS)$/) {
-                next
-            }
+            if [[ "$filepath" =~ \.(dat|gz|bz2|zip|rar|xz|lz4|zst|gzip)$ ]]; then
+                continue
+            fi
             
             # Skip files smaller than threshold
-            if (size < min_size) {
-                next
-            }
+            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
+                continue
+            fi
             
-            print filepath
-        }' >> "$ALL_FILEPATHS_FILE"
+            echo "$filepath" >> "$ALL_FILEPATHS_FILE"
+        done
         
-        file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
-        if [ "$file_count" -gt 0 ]; then
-            main_log "    Found $file_count eligible files (after size and extension filters)"
+        file_after=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        files_added=$((file_after - file_before))
+        main_log "    Debug: Added $files_added files from this route"
+        
+        if [ "$files_added" -gt 0 ]; then
+            main_log "    Found $files_added eligible files (after size and extension filters)"
         else
             main_log "    Warning: Could not scan route or no eligible files found"
         fi
     else
-        # Get files modified in the last N days with size and extension filtering
-        # Calculate cutoff timestamp (current time - DAYS_BACK days)
+        # For date filtering, first collect all eligible files by size/extension, then filter by date
+        # This is simpler and more reliable than trying to parse dates in awk
         cutoff_timestamp=$(($(date +%s) - (DAYS_BACK * 86400)))
+        cutoff_date=$(date -d @"$cutoff_timestamp" '+%Y-%m-%d %H:%M:%S')
+        main_log "    Debug: Mode=DATE (last $DAYS_BACK days), cutoff=$cutoff_date"
         
-        # Use awk to parse hdfs ls output and filter by date, size, and extension
-        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | awk \
-            -v cutoff="$cutoff_timestamp" \
-            -v min_size="$MIN_FILE_SIZE_THRESHOLD" \
-            -v excl_ext="$EXCLUDED_EXTENSIONS" \
-            '
-        {
-            # Fields: perms repl owner group size month day time/year ... filepath
-            filepath = $NF
-            size = $5
-            month = $6
-            day = $7
-            time_or_year = $8
+        file_before=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        debug_parsed=0
+        debug_skipped_ext=0
+        debug_skipped_size=0
+        debug_skipped_date=0
+        debug_collected=0
+        
+        hdfs dfs -ls -R "$route" 2>/dev/null | grep "^-" | while read -r line; do
+            # Parse the line
+            size=$(echo "$line" | awk '{print $5}')
+            month=$(echo "$line" | awk '{print $6}')
+            day=$(echo "$line" | awk '{print $7}')
+            time_or_year=$(echo "$line" | awk '{print $8}')
+            filepath=$(echo "$line" | awk '{print $NF}')
+            
+            debug_parsed=$((debug_parsed + 1))
             
             # Skip files with excluded extensions
-            if (filepath ~ /\.($EXCLUDED_EXTENSIONS)$/) {
-                next
-            }
+            if [[ "$filepath" =~ \.(dat|gz|bz2|zip|rar|xz|lz4|zst|gzip)$ ]]; then
+                debug_skipped_ext=$((debug_skipped_ext + 1))
+                continue
+            fi
             
             # Skip files smaller than threshold
-            if (size < min_size) {
-                next
-            }
+            if [ "$size" -lt "$MIN_FILE_SIZE_THRESHOLD" ]; then
+                debug_skipped_size=$((debug_skipped_size + 1))
+                continue
+            fi
             
-            # Parse date string and convert to timestamp
-            if (time_or_year ~ /^[0-9]{4}$/) {
-                # Year format: older file
-                datestr = month " " day " " time_or_year " 00:00"
-            } else {
-                # Time format: current year
-                current_year = strftime("%Y", systime())
-                datestr = month " " day " " current_year " " time_or_year
-            }
+            # Convert file timestamp
+            if [[ "$time_or_year" =~ ^[0-9]{4}$ ]]; then
+                # Year format
+                file_ts=$(date -d "$month $day $time_or_year 00:00" +%s 2>/dev/null || echo 0)
+            else
+                # Time format
+                current_year=$(date +%Y)
+                file_ts=$(date -d "$month $day $current_year $time_or_year" +%s 2>/dev/null || echo 0)
+            fi
             
-            # Convert to timestamp using system command
-            cmd = "date -d \"" datestr "\" +%s 2>/dev/null"
-            if ((cmd | getline file_ts) > 0) {
-                close(cmd)
-                if (file_ts > cutoff) {
-                    print filepath
-                }
-            } else {
-                close(cmd)
-            }
-        }' >> "$ALL_FILEPATHS_FILE"
+            # Add file if it's within cutoff
+            if [ "$file_ts" -gt "$cutoff_timestamp" ]; then
+                echo "$filepath" >> "$ALL_FILEPATHS_FILE"
+                debug_collected=$((debug_collected + 1))
+            else
+                debug_skipped_date=$((debug_skipped_date + 1))
+            fi
+        done
         
-        file_count=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
-        if [ "$file_count" -gt 0 ]; then
-            main_log "    Found $file_count eligible files (after date, size, and extension filters)"
+        file_after=$(wc -l < "$ALL_FILEPATHS_FILE" 2>/dev/null || echo 0)
+        files_added=$((file_after - file_before))
+        
+        main_log "    Debug: Parsed=$debug_parsed, SkippedExt=$debug_skipped_ext, SkippedSize=$debug_skipped_size, SkippedDate=$debug_skipped_date, Collected=$debug_collected"
+        
+        if [ "$files_added" -gt 0 ]; then
+            main_log "    Found $files_added eligible files (after date, size, and extension filters)"
         else
             main_log "    Warning: Could not scan route or no eligible files found"
         fi
@@ -179,6 +199,14 @@ done < "$ROUTES_FILE"
 
 total_files=$(wc -l < "$ALL_FILEPATHS_FILE")
 main_log "Total files found: $total_files"
+
+# Debug: show sample of collected files
+if [ "$total_files" -gt 0 ]; then
+    main_log "Debug: Sample collected files (first 5):"
+    head -5 "$ALL_FILEPATHS_FILE" | while read -r file; do
+        main_log "  - $file"
+    done
+fi
 
 if [ "$total_files" -eq 0 ]; then
     main_log "No files found to compress. Exiting."
@@ -191,6 +219,15 @@ files_per_process=$(( (total_files + NUM_CHILD_PROCESSES - 1) / NUM_CHILD_PROCES
 main_log "Approximate files per process: $files_per_process"
 
 split -l "$files_per_process" "$ALL_FILEPATHS_FILE" "$WORK_DIR/filepaths_chunk_"
+
+# Debug: verify chunks were created
+chunk_count=$(ls "$WORK_DIR"/filepaths_chunk_* 2>/dev/null | wc -l)
+main_log "Debug: Split created $chunk_count chunk files"
+for chunk in "$WORK_DIR"/filepaths_chunk_*; do
+    chunk_lines=$(wc -l < "$chunk")
+    main_log "Debug: $(basename $chunk) contains $chunk_lines files"
+done
+
 main_log "Filepaths split completed"
 
 # Start child processes
